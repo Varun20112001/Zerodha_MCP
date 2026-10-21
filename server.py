@@ -7,13 +7,16 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from kiteconnect import KiteConnect, KiteTicker
+from kiteconnect.exceptions import TokenException
 from mcp.server.fastmcp import FastMCP
 
 from audit import SQLiteBatchWriter
+from login import KiteLoginServer
 
 load_dotenv()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -22,6 +25,8 @@ logger = logging.getLogger("zerodha-mcp")
 API_KEY = os.getenv("KITE_API_KEY", "")
 API_SECRET = os.getenv("KITE_API_SECRET", "")
 ACCESS_TOKEN = os.getenv("KITE_ACCESS_TOKEN", "")
+REDIRECT_URL = os.getenv("KITE_REDIRECT_URL", "http://127.0.0.1:5000/login")
+ENV_PATH = Path(__file__).resolve().parent / ".env"
 AUDIT = SQLiteBatchWriter(
     os.getenv("MCP_SQLITE_PATH", "./kite_tool_calls.sqlite3"),
     int(os.getenv("MCP_AUDIT_BATCH_SIZE", "25")),
@@ -32,9 +37,13 @@ AUDIT = SQLiteBatchWriter(
 @asynccontextmanager
 async def lifespan(_server: Any):
     await AUDIT.start()
+    LOGIN.start()
+    if kite:
+        kite.set_session_expiry_hook(LOGIN.mark_expired)
     try:
         yield {"audit": AUDIT}
     finally:
+        LOGIN.stop()
         await AUDIT.close()
 
 
@@ -48,7 +57,7 @@ _ticker_thread: Any = None
 _tick_buffer: list[dict[str, Any]] = []
 _tick_lock = asyncio.Lock()
 _LOOP: asyncio.AbstractEventLoop | None = None
-_SESSION_EXPIRED = False
+LOGIN = KiteLoginServer(kite, API_SECRET, REDIRECT_URL, ENV_PATH)
 
 
 def _client() -> KiteConnect:
@@ -142,16 +151,29 @@ def _register_rest_tool(name: str, description: str) -> None:
                 session_arguments = dict(arguments)
                 session_arguments.setdefault("api_secret", API_SECRET)
                 result = await asyncio.to_thread(client.generate_session, **session_arguments)
+                token = result.get("access_token") if isinstance(result, dict) else None
+                if token:
+                    await asyncio.to_thread(LOGIN.activate_access_token, token)
+                    result = {
+                        "status": "authenticated",
+                        "user_id": result.get("user_id"),
+                        "user_name": result.get("user_name"),
+                        "login_time": str(result.get("login_time")) if result.get("login_time") else None,
+                    }
             elif name == "set_session_expiry_hook":
                 if arguments:
                     raise ValueError("This MCP tool takes no arguments")
-                def on_expiry() -> None:
-                    global _SESSION_EXPIRED
-                    _SESSION_EXPIRED = True
-                result = await asyncio.to_thread(client.set_session_expiry_hook, on_expiry)
+                result = await asyncio.to_thread(client.set_session_expiry_hook, LOGIN.mark_expired)
             else:
                 method = getattr(client, name)
                 result = await asyncio.to_thread(method, **arguments)
+            return result
+        except TokenException as exc:
+            LOGIN.mark_expired()
+            error = f"{type(exc).__name__}: {exc}"
+            result = LOGIN.login_instructions()
+            result["status"] = "authentication_required"
+            result["message"] = "Kite rejected the session. Complete login using login_url, then retry this tool."
             return result
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
@@ -183,7 +205,7 @@ async def set_access_token(access_token: str) -> dict[str, str]:
     error = None
     result = None
     try:
-        _client().set_access_token(access_token)
+        await asyncio.to_thread(LOGIN.activate_access_token, access_token)
         result = {"status": "access token set"}
         return result
     except Exception as exc:
@@ -196,9 +218,24 @@ async def set_access_token(access_token: str) -> dict[str, str]:
 
 @mcp.tool(description="Return whether the SDK session-expiry hook has fired since this server started.")
 async def session_expiry_status() -> dict[str, bool]:
-    result = {"expired": _SESSION_EXPIRED}
+    result = {"expired": LOGIN.expired}
     await AUDIT.record("session_expiry_status", {}, result, None, 0.0)
     return result
+
+
+@mcp.tool(description="Start or resume Kite login and return the Zerodha login link and local callback URL.")
+async def kite_login() -> dict[str, str | bool]:
+    started = time.perf_counter()
+    error = None
+    result = None
+    try:
+        result = LOGIN.login_instructions()
+        return result
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        await AUDIT.record("kite_login", {}, result, error, (time.perf_counter() - started) * 1000)
 
 
 @mcp.tool(description="Connect the KiteTicker WebSocket in a background thread.")
