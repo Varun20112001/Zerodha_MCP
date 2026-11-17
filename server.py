@@ -27,10 +27,14 @@ API_SECRET = os.getenv("KITE_API_SECRET", "")
 ACCESS_TOKEN = os.getenv("KITE_ACCESS_TOKEN", "")
 REDIRECT_URL = os.getenv("KITE_REDIRECT_URL", "http://127.0.0.1:5000/login")
 ENV_PATH = Path(__file__).resolve().parent / ".env"
+AUDIT_ENABLED = os.getenv("MCP_AUDIT_ENABLED", "false").strip().lower() in {
+    "1", "true", "yes", "on",
+}
 AUDIT = SQLiteBatchWriter(
     os.getenv("MCP_SQLITE_PATH", "./kite_tool_calls.sqlite3"),
-    int(os.getenv("MCP_AUDIT_BATCH_SIZE", "25")),
-    float(os.getenv("MCP_AUDIT_FLUSH_INTERVAL_SECONDS", "2")),
+    int(os.getenv("MCP_AUDIT_BATCH_SIZE", "10")),
+    float(os.getenv("MCP_AUDIT_FLUSH_INTERVAL_SECONDS", "30")),
+    enabled=AUDIT_ENABLED,
 )
 
 

@@ -71,23 +71,26 @@ retries, stop, and close. Call `ticker_connect` before subscribing. Recent ticks
 are kept in a bounded in-memory buffer (up to 5,000) and retrieved with
 `ticker_read_ticks`.
 
-## SQLite audit batching
+## Optional SQLite audit batching
 
-Every tool invocation is queued in memory, then written with SQLite
-`executemany` from a background worker. The worker flushes at the configured
-batch size, after the flush interval for partial batches, and on clean shutdown.
-Defaults are 25 calls or 2 seconds, whichever comes first.
+Audit logging is disabled by default. Set `MCP_AUDIT_ENABLED=true` to queue tool
+calls in memory and write them to SQLite with `executemany` from a background
+worker. With the setting false, the server does not open or create a SQLite
+database and does not store tool call logs. When enabled, the worker flushes at
+the configured batch size, after the interval for partial batches, and on clean
+shutdown.
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
+| `MCP_AUDIT_ENABLED` | `false` | Enable or disable all SQLite audit logging |
 | `MCP_SQLITE_PATH` | `./kite_tool_calls.sqlite3` | SQLite audit database path |
-| `MCP_AUDIT_BATCH_SIZE` | `25` | Calls per batch flush |
-| `MCP_AUDIT_FLUSH_INTERVAL_SECONDS` | `2` | Max delay for partial batches |
+| `MCP_AUDIT_BATCH_SIZE` | `10` | Calls per batch flush |
+| `MCP_AUDIT_FLUSH_INTERVAL_SECONDS` | `30` | Max delay for partial batches |
 
-The `tool_calls` table stores UTC time, tool name, JSON arguments and result,
-error text, and duration in milliseconds. Credential fields such as access,
-refresh, request, and API secret tokens are redacted. Large JSON values are
-truncated to keep the audit database bounded per call. Since batching is
+When enabled, the `tool_calls` table stores UTC time, tool name, JSON arguments
+and result, error text, and duration in milliseconds. Credential fields such as
+access, refresh, request, and API secret tokens are redacted. Large JSON values
+are truncated to keep the audit database bounded per call. Since batching is
 in-memory, an abrupt process termination can lose the pending batch.
 
 ## Notes

@@ -48,14 +48,19 @@ def _json(value: Any, limit: int = 16_000) -> str:
 class SQLiteBatchWriter:
     """Queue audit events in memory and persist them in SQLite batches."""
 
-    def __init__(self, path: str, batch_size: int = 25, flush_interval: float = 2.0):
+    def __init__(self, path: str, batch_size: int = 10, flush_interval: float = 30.0,
+                 enabled: bool = True):
         self.path = Path(path).expanduser()
         self.batch_size = max(1, batch_size)
         self.flush_interval = max(0.1, flush_interval)
+        self.enabled = enabled
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
         self._task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
+        if not self.enabled:
+            logger.info("SQLite audit logging is disabled")
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(self._initialize)
         self._task = asyncio.create_task(self._worker(), name="sqlite-audit-writer")
@@ -78,6 +83,8 @@ class SQLiteBatchWriter:
 
     async def record(self, tool_name: str, arguments: Any, result: Any,
                      error: str | None, duration_ms: float) -> None:
+        if not self.enabled:
+            return
         # Enqueueing is in-memory and returns without waiting for disk I/O.
         await self.queue.put((
             datetime.now(timezone.utc).isoformat(), tool_name, _json(arguments),
